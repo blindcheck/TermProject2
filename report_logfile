@@ -1,0 +1,48 @@
+송신자 및 수신자 코드
+
+신뢰할 수 있는 데이터 전송(RDT) 프로토콜을 구현한 송신자(sender.c)와 수신자(receiver.c) 프로그램의 로그 파일을 출력해 봤다.
+다음 로그 파일은 프로그램 실행 중 발생하는 주요 이벤트를 기록하여 디버깅과 성능 분석에 사용한다.
+
+각 로그 항목은 다음과 같은 형식으로 기록된다:
+
+타임스탬프: 이벤트가 발생한 시간
+이벤트 설명: 발생한 이벤트의 상세 설명
+관련 정보: 이벤트와 관련된 추가 정보 (예: 패킷 번호, 타입 등)
+
+다음은 송신자 로그 파일의 이벤트이다.
+Sent DATA packet: 송신자가 DATA 패킷을 전송한 경우
+  seqNum: 전송된 데이터 패킷의 시퀀스 번호
+  length: 전송된 데이터의 길이 (바이트 단위)
+Received ACK packet: 송신자가 수신자로부터 ACK 패킷을 수신한 경우
+  ackNum: 수신된 ACK 패킷의 ACK 번호
+Timeout, resending DATA packet: 송신자가 타임아웃 발생으로 인해 데이터 패킷을 재전송하는 경우
+  seqNum: 재전송된 데이터 패킷의 시퀀스 번호
+Sent EOT packet: 송신자가 전송 종료를 알리는 EOT 패킷을 전송한 경우
+  seqNum: EOT 패킷의 시퀀스 번호
+
+예시 송신자 로그:
+Tue Jun 18 12:34:56 2024: Sent DATA packet, seqNum: 0, length: 1000
+Tue Jun 18 12:34:57 2024: Received ACK packet, ackNum: 0
+Tue Jun 18 12:34:58 2024: Sent DATA packet, seqNum: 1, length: 1000
+Tue Jun 18 12:34:59 2024: Timeout, resending DATA packet, seqNum: 1
+Tue Jun 18 12:35:00 2024: Received ACK packet, ackNum: 1
+Tue Jun 18 12:35:01 2024: Sent EOT packet, seqNum: 2
+
+다음은 수신자 로그 파일의 이벤트이다.
+Received DATA packet: 수신자가 송신자로부터 DATA 패킷을 수신한 경우
+  seqNum: 수신된 데이터 패킷의 시퀀스 번호
+  length: 수신된 데이터의 길이 (바이트 단위)
+Dropped DATA packet: 수신자가 데이터 패킷을 폐기한 경우 (패킷 손실 시뮬레이션)
+  seqNum: 폐기된 데이터 패킷의 시퀀스 번호
+Sent ACK packet: 수신자가 송신자에게 ACK 패킷을 전송한 경우
+  ackNum: 전송된 ACK 패킷의 ACK 번호
+Received EOT packet: 수신자가 전송 종료를 알리는 EOT 패킷을 수신한 경우
+  seqNum: EOT 패킷의 시퀀스 번호
+
+예시 수신자 로그:
+Tue Jun 18 12:34:56 2024: Received DATA packet, seqNum: 0, length: 1000
+Tue Jun 18 12:34:57 2024: Sent ACK packet, ackNum: 0
+Tue Jun 18 12:34:58 2024: Dropped DATA packet, seqNum: 1
+Tue Jun 18 12:34:59 2024: Received DATA packet, seqNum: 1, length: 1000
+Tue Jun 18 12:35:00 2024: Sent ACK packet, ackNum: 1
+Tue Jun 18 12:35:01 2024: Received EOT packet, seqNum: 2
