@@ -1,0 +1,126 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <time.h>
+
+// 패킷 구조 정의
+#define CHUNK_SIZE 1000
+#define DATA 1
+#define ACK 2
+#define EOT 3
+
+typedef struct {
+    int type;       // 패킷 타입 (DATA, ACK, EOT)
+    int seqNum;     // 시퀀스 번호
+    int ackNum;     // ACK 번호
+    int length;     // 데이터 길이
+    char data[CHUNK_SIZE];  // 데이터
+} Packet;
+
+// 이벤트 로그 함수
+void log_event(const char *event) {
+    time_t now;
+    time(&now);
+    printf("%s: %s\n", ctime(&now), event);
+}
+
+// 파일 수신 함수
+void receive_file(int receiver_port, float drop_prob, const char *save_path) {
+    int sockfd;
+    struct sockaddr_in receiver_addr, sender_addr;
+    socklen_t addr_len = sizeof(sender_addr);
+    Packet packet;
+    Packet ack_packet;
+    FILE *file;
+    int expected_seqNum = 0;
+    ssize_t n;
+    float random_prob;
+
+    // UDP 소켓 생성
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    // 수신자 주소 설정
+    memset(&receiver_addr, 0, sizeof(receiver_addr));
+    receiver_addr.sin_family = AF_INET;
+    receiver_addr.sin_port = htons(receiver_port);
+    receiver_addr.sin_addr.s_addr = INADDR_ANY;
+
+    // 소켓 바인딩
+    if (bind(sockfd, (struct sockaddr *)&receiver_addr, sizeof(receiver_addr)) < 0) {
+        perror("bind");
+        exit(EXIT_FAILURE);
+    }
+
+    // 파일 열기
+    file = fopen(save_path, "wb");
+    if (!file) {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+
+    // 패킷 수신
+    while (1) {
+        n = recvfrom(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)&sender_addr, &addr_len);
+        if (n < 0) {
+            perror("recvfrom");
+            exit(EXIT_FAILURE);
+        }
+
+        // EOT 패킷 처리
+        if (packet.type == EOT) {
+            log_event("Received EOT packet");
+            break;
+        }
+
+        // DATA 패킷 처리
+        if (packet.type == DATA && packet.seqNum == expected_seqNum) {
+            random_prob = (float)rand() / RAND_MAX;
+            if (random_prob < drop_prob) {
+                log_event("Dropped DATA packet");
+                continue;
+            }
+
+            fwrite(packet.data, 1, packet.length, file);
+            log_event("Received DATA packet");
+
+            // ACK 패킷 전송
+            ack_packet.type = ACK;
+            ack_packet.seqNum = packet.seqNum;
+            ack_packet.ackNum = packet.seqNum;
+            ack_packet.length = 0;
+            if (sendto(sockfd, &ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&sender_addr, addr_len) < 0) {
+                perror("sendto");
+                exit(EXIT_FAILURE);
+            }
+            log_event("Sent ACK packet");
+
+            expected_seqNum++;
+        }
+    }
+
+    // 자원 해제
+    fclose(file);
+    close(sockfd);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <receiver_port> <drop_prob>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    int receiver_port = atoi(argv[1]);
+    float drop_prob = atof(argv[2]);
+    const char *save_path = "received_file";
+
+    srand(time(NULL));
+    receive_file(receiver_port, drop_prob, save_path);
+
+    return 0;
+}
