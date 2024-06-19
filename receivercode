@@ -1,126 +1,104 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <time.h>
+# 수신자 코드
+## 연결 설정, 데이터 수신 및 연결 종료를 포함하여 TCP의 주요 기능을 구현, 패킷 드롭을 처리합니다.
 
-// 패킷 구조 정의
-#define CHUNK_SIZE 1000
-#define DATA 1
-#define ACK 2
-#define EOT 3
+import socket
+import random
+import time
 
-typedef struct {
-    int type;       // 패킷 타입 (DATA, ACK, EOT)
-    int seqNum;     // 시퀀스 번호
-    int ackNum;     // ACK 번호
-    int length;     // 데이터 길이
-    char data[CHUNK_SIZE];  // 데이터
-} Packet;
+class TCPReceiver:
+    def __init__(self, receiver_port, drop_prob):
+        self.receiver_port = receiver_port
+        self.drop_prob = drop_prob
 
-// 이벤트 로그 함수
-void log_event(const char *event) {
-    time_t now;
-    time(&now);
-    printf("%s: %s\n", ctime(&now), event);
-}
+        self.receiver_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.receiver_socket.bind(('', receiver_port))
 
-// 파일 수신 함수
-void receive_file(int receiver_port, float drop_prob, const char *save_path) {
-    int sockfd;
-    struct sockaddr_in receiver_addr, sender_addr;
-    socklen_t addr_len = sizeof(sender_addr);
-    Packet packet;
-    Packet ack_packet;
-    FILE *file;
-    int expected_seqNum = 0;
-    ssize_t n;
-    float random_prob;
+        self.expected_seq_num = 0
+        self.start_time = time.time()
 
-    // UDP 소켓 생성
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
+    def log_event(self, event, packet=None):
+        timestamp = time.time() - self.start_time
+        if packet:
+            print(f"[{timestamp:.2f}] {event} - SeqNum: {packet.seq_num}, AckNum: {packet.ack_num}")
+        else:
+            print(f"[{timestamp:.2f}] {event}")
 
-    // 수신자 주소 설정
-    memset(&receiver_addr, 0, sizeof(receiver_addr));
-    receiver_addr.sin_family = AF_INET;
-    receiver_addr.sin_port = htons(receiver_port);
-    receiver_addr.sin_addr.s_addr = INADDR_ANY;
+    def handshake(self):
+        # 연결 설정: 3-way 핸드셰이크
+        syn_data, client_address = self.receiver_socket.recvfrom(1024)
+        syn_pkt, _ = Packet.from_bytes(syn_data)
+        if syn_pkt.flag == SYN_FLAG:
+            self.log_event("Received SYN", syn_pkt)
+            syn_ack_pkt = Packet(DATA, SYN_FLAG, 0, 1)
+            self.receiver_socket.sendto(syn_ack_pkt.to_bytes(), client_address)
+            self.log_event("Sent SYN-ACK", syn_ack_pkt)
 
-    // 소켓 바인딩
-    if (bind(sockfd, (struct sockaddr *)&receiver_addr, sizeof(receiver_addr)) < 0) {
-        perror("bind");
-        exit(EXIT_FAILURE);
-    }
+            # Step 2: Receive ACK
+            try:
+                ack_data, _ = self.receiver_socket.recvfrom(1024)
+                ack_pkt, _ = Packet.from_bytes(ack_data)
+                if ack_pkt.flag == NONE and ack_pkt.ack_num == 1:
+                    self.log_event("Received ACK", ack_pkt)
+                    return client_address
+            except socket.timeout:
+                self.log_event("Handshake failed due to timeout")
+        return None
 
-    // 파일 열기
-    file = fopen(save_path, "wb");
-    if (!file) {
-        perror("fopen");
-        exit(EXIT_FAILURE);
-    }
+    def receive_file(self, client_address):
+        received_data = {}
+        while True:
+            data, _ = self.receiver_socket.recvfrom(1024)
+            packet, _ = Packet.from_bytes(data)
+            
+            if packet.flag == FIN_FLAG:
+                self.log_event("Received FIN", packet)
+                fin_ack_pkt = Packet(DATA, FIN_FLAG, packet.seq_num)
+                self.receiver_socket.sendto(fin_ack_pkt.to_bytes(), client_address)
+                self.log_event("Sent FIN-ACK", fin_ack_pkt)
+                break
 
-    // 패킷 수신
-    while (1) {
-        n = recvfrom(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)&sender_addr, &addr_len);
-        if (n < 0) {
-            perror("recvfrom");
-            exit(EXIT_FAILURE);
-        }
+            if random.random() < self.drop_prob:
+                self.log_event("Dropped DATA", packet)
+                continue
 
-        // EOT 패킷 처리
-        if (packet.type == EOT) {
-            log_event("Received EOT packet");
-            break;
-        }
+            if packet.seq_num == self.expected_seq_num:
+                self.log_event("Received DATA", packet)
+                received_data[packet.seq_num] = packet.data
+                self.expected_seq_num += 1
+            else:
+                self.log_event("Out of order DATA", packet)
+            
+            ack_pkt = Packet(ACK, NONE, 0, self.expected_seq_num)
+            self.receiver_socket.sendto(ack_pkt.to_bytes(), client_address)
+            self.log_event("Sent ACK", ack_pkt)
 
-        // DATA 패킷 처리
-        if (packet.type == DATA && packet.seqNum == expected_seqNum) {
-            random_prob = (float)rand() / RAND_MAX;
-            if (random_prob < drop_prob) {
-                log_event("Dropped DATA packet");
-                continue;
-            }
+    def teardown(self):
+        fin_pkt = Packet(DATA, FIN_FLAG, self.expected_seq_num)
+        self.receiver_socket.sendto(fin_pkt.to_bytes(), client_address)
+        self.log_event("Sent FIN", fin_pkt)
 
-            fwrite(packet.data, 1, packet.length, file);
-            log_event("Received DATA packet");
+        try:
+            response, _ = self.receiver_socket.recvfrom(1024)
+            fin_ack_pkt, _ = Packet.from_bytes(response)
+            if fin_ack_pkt.flag == FIN_FLAG:
+                self.log_event("Received FIN-ACK", fin_ack_pkt)
+                ack_pkt = Packet(ACK, NONE, fin_ack_pkt.seq_num + 1)
+                self.receiver_socket.sendto(ack_pkt.to_bytes(), client_address)
+                self.log_event("Sent ACK", ack_pkt)
+        except socket.timeout:
+            self.log_event("Teardown failed due to timeout")
 
-            // ACK 패킷 전송
-            ack_packet.type = ACK;
-            ack_packet.seqNum = packet.seqNum;
-            ack_packet.ackNum = packet.seqNum;
-            ack_packet.length = 0;
-            if (sendto(sockfd, &ack_packet, sizeof(ack_packet), 0, (struct sockaddr *)&sender_addr, addr_len) < 0) {
-                perror("sendto");
-                exit(EXIT_FAILURE);
-            }
-            log_event("Sent ACK packet");
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) != 3:
+        print("Usage: receiver.py <receiver_port> <drop_prob>")
+        sys.exit(1)
 
-            expected_seqNum++;
-        }
-    }
+    receiver_port = int(sys.argv[1])
+    drop_prob = float(sys.argv[2])
 
-    // 자원 해제
-    fclose(file);
-    close(sockfd);
-}
-
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <receiver_port> <drop_prob>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-
-    int receiver_port = atoi(argv[1]);
-    float drop_prob = atof(argv[2]);
-    const char *save_path = "received_file";
-
-    srand(time(NULL));
-    receive_file(receiver_port, drop_prob, save_path);
-
-    return 0;
-}
+    receiver = TCPReceiver(receiver_port, drop_prob)
+    client_address = receiver.handshake()
+    if client_address:
+        receiver.receive_file(client_address)
+        receiver.teardown()
