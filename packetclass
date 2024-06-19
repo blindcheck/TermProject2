@@ -1,0 +1,26 @@
+# 패킷 클래스
+
+import struct
+import time
+
+class Packet:
+    def __init__(self, pkt_type, flag, seq_num, ack_num=0, data=''):
+        self.type = pkt_type  # 패킷 타입 (DATA, ACK)
+        self.flag = flag      # 플래그 (SYN, FIN, NONE)
+        self.seq_num = seq_num # 시퀀스 번호
+        self.ack_num = ack_num # ACK 번호
+        self.data = data.encode() if data else b'' # 데이터
+        self.length = len(self.data) # 데이터 길이
+    
+    def to_bytes(self):
+        # 패킷을 바이트로 변환
+        header = struct.pack('iiiiii', self.type, self.flag, self.seq_num, self.ack_num, self.length, int(time.time()))
+        return header + self.data
+    
+    @staticmethod
+    def from_bytes(raw_data):
+        # 바이트에서 패킷을 재구성
+        header = raw_data[:24]
+        pkt_type, flag, seq_num, ack_num, length, timestamp = struct.unpack('iiiiii', header)
+        data = raw_data[24:24+length].decode()
+        return Packet(pkt_type, flag, seq_num, ack_num, data), timestamp
