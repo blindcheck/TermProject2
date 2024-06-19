@@ -1,55 +1,135 @@
-# 송신자 프로그램 (sender.c)
+# 송신자 프로그램
 
-## 개요
-송신자 프로그램은 UDP를 통해 파일을 수신자에게 전송합니다. 이 프로그램은 신뢰할 수 있는 데이터 전송(Reliable Data Transfer, RDT) 프로토콜을 구현하며, 패킷 손실과 중복 패킷을 처리합니다. 송신자는 stop-and-wait 모델을 따르며, ACK를 기다린 후 다음 패킷을 전송합니다.
+import socket
+import os
+import random
+import time
 
-## 패킷 구조
-- **type**: 패킷 타입 (DATA, ACK, EOT)
-- **seqNum**: 시퀀스 번호
-- **ackNum**: ACK 번호
-- **length**: 데이터 길이 (0-1000 바이트)
-- **data**: 실제 데이터 (최대 1000 바이트)
+# 패킷 타입 및 플래그 상수 정의
+DATA = 0
+ACK = 1
+SYN = 2
+FIN = 3
 
-## 요구사항
-- C 컴파일러 (예: `gcc`)
+NONE = 0
+SYN_FLAG = 1
+FIN_FLAG = 2
 
-## 컴파일 방법
-송신자 프로그램을 컴파일하려면 다음 명령어를 사용합니다:
+class TCPSender:
+    def __init__(self, sender_port, receiver_ip, receiver_port, timeout, filename, drop_prob):
+        self.sender_port = sender_port
+        self.receiver_address = (receiver_ip, receiver_port)
+        self.timeout = timeout
+        self.filename = filename
+        self.drop_prob = drop_prob
 
-```bash
-gcc -o sender sender.c
+        self.sender_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sender_socket.bind(('', sender_port))
+        self.sender_socket.settimeout(timeout)
 
-## 실행 방법
-./sender <sender_port> <receiver_ip> <receiver_port> <timeout_interval> <filename> <drop_prob>
-- sender_port: 송신자 포트 번호
-- receiver_ip: 수신자 IP 주소
-- receiver_port: 수신자 포트 번호
-- timeout_interval: 타임아웃 간격 (초)
-- filename: 전송할 파일 이름
-- drop_prob: ACK 패킷 폐기 확률 (0.0 ~ 1.0)
+        self.cwnd = 1
+        self.ssthresh = 64
+        self.base = 0
+        self.next_seq_num = 0
+        self.duplicate_acks = 0
+        self.start_time = time.time()
+    
+    def log_event(self, event, packet=None):
+        timestamp = time.time() - self.start_time
+        if packet:
+            print(f"[{timestamp:.2f}] {event} - SeqNum: {packet.seq_num}, AckNum: {packet.ack_num}, CWND: {self.cwnd}")
+        else:
+            print(f"[{timestamp:.2f}] {event}")
 
+    def handshake(self):
+        # 연결 설정: 3-way 핸드셰이크
+        syn_pkt = Packet(DATA, SYN_FLAG, 0)
+        self.sender_socket.sendto(syn_pkt.to_bytes(), self.receiver_address)
+        self.log_event("Sent SYN", syn_pkt)
+        
+        try:
+            response, _ = self.sender_socket.recvfrom(1024)
+            syn_ack_pkt, _ = Packet.from_bytes(response)
+            if syn_ack_pkt.flag == SYN_FLAG and syn_ack_pkt.ack_num == 1:
+                self.log_event("Received SYN-ACK", syn_ack_pkt)
+                ack_pkt = Packet(ACK, NONE, 1, syn_ack_pkt.seq_num + 1)
+                self.sender_socket.sendto(ack_pkt.to_bytes(), self.receiver_address)
+                self.log_event("Sent ACK", ack_pkt)
+                return True
+        except socket.timeout:
+            self.log_event("Handshake failed due to timeout")
+        return False
 
-# 수신자 프로그램 (receiver.c)
+    def send_file(self):
+        # 파일을 작은 청크로 나누기
+        with open(self.filename, 'rb') as file:
+            chunks = [file.read(1000) for _ in range(0, os.path.getsize(self.filename), 1000)]
+        
+        while self.base < len(chunks):
+            while self.next_seq_num < self.base + self.cwnd and self.next_seq_num < len(chunks):
+                data_pkt = Packet(DATA, NONE, self.next_seq_num, 0, chunks[self.next_seq_num].decode())
+                self.sender_socket.sendto(data_pkt.to_bytes(), self.receiver_address)
+                self.log_event("Sent DATA", data_pkt)
+                self.next_seq_num += 1
 
-## 개요
-수신자 프로그램은 UDP를 통해 송신자로부터 파일을 수신합니다. 이 프로그램은 신뢰할 수 있는 데이터 전송(Reliable Data Transfer, RDT) 프로토콜을 구현하며, 패킷 손실과 중복 패킷을 처리합니다. 수신자는 stop-and-wait 모델을 따르며, 받은 패킷에 대해 ACK를 송신자에게 보냅니다.
+            self.sender_socket.settimeout(self.timeout)
+            try:
+                ack_data, _ = self.sender_socket.recvfrom(1024)
+                ack_pkt, _ = Packet.from_bytes(ack_data)
+                if ack_pkt.type == ACK:
+                    self.log_event("Received ACK", ack_pkt)
+                    if ack_pkt.ack_num > self.base:
+                        self.base = ack_pkt.ack_num
+                        self.duplicate_acks = 0
+                        if self.cwnd < self.ssthresh:
+                            self.cwnd *= 2
+                        else:
+                            self.cwnd += 1
+                    elif ack_pkt.ack_num == self.base:
+                        self.duplicate_acks += 1
+                        if self.duplicate_acks == 3:
+                            self.ssthresh = max(self.cwnd // 2, 1)
+                            self.cwnd = self.ssthresh + 3
+                            self.sender_socket.sendto(chunks[self.base].to_bytes(), self.receiver_address)
+                            self.log_event("Fast Retransmit", ack_pkt)
+            except socket.timeout:
+                self.log_event("Timeout, retransmitting")
+                self.ssthresh = max(self.cwnd // 2, 1)
+                self.cwnd = 1
+                self.next_seq_num = self.base
+                self.duplicate_acks = 0
+    
+    def teardown(self):
+        # 연결 종료: 4-way 핸드셰이크
+        fin_pkt = Packet(DATA, FIN_FLAG, self.next_seq_num)
+        self.sender_socket.sendto(fin_pkt.to_bytes(), self.receiver_address)
+        self.log_event("Sent FIN", fin_pkt)
 
-## 패킷 구조
-- **type**: 패킷 타입 (DATA, ACK, EOT)
-- **seqNum**: 시퀀스 번호
-- **ackNum**: ACK 번호
-- **length**: 데이터 길이 (0-1000 바이트)
-- **data**: 실제 데이터 (최대 1000 바이트)
+        try:
+            response, _ = self.sender_socket.recvfrom(1024)
+            fin_ack_pkt, _ = Packet.from_bytes(response)
+            if fin_ack_pkt.flag == FIN_FLAG:
+                self.log_event("Received FIN-ACK", fin_ack_pkt)
+                ack_pkt = Packet(ACK, NONE, fin_ack_pkt.seq_num + 1)
+                self.sender_socket.sendto(ack_pkt.to_bytes(), self.receiver_address)
+                self.log_event("Sent ACK", ack_pkt)
+        except socket.timeout:
+            self.log_event("Teardown failed due to timeout")
 
-## 요구사항
-- C 컴파일러 (예: `gcc`)
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) != 7:
+        print("Usage: sender.py <sender_port> <receiver_ip> <receiver_port> <timeout> <filename> <drop_prob>")
+        sys.exit(1)
 
-## 컴파일 방법
-수신자 프로그램을 컴파일하려면 다음 명령어를 사용합니다:
+    sender_port = int(sys.argv[1])
+    receiver_ip = sys.argv[2]
+    receiver_port = int(sys.argv[3])
+    timeout = float(sys.argv[4])
+    filename = sys.argv[5]
+    drop_prob = float(sys.argv[6])
 
-```bash
-gcc -o receiver receiver.c
-
-## 실행 방법
-./receiver <receiver_port> <drop_prob>
-
+    sender = TCPSender(sender_port, receiver_ip, receiver_port, timeout, filename, drop_prob)
+    if sender.handshake():
+        sender.send_file()
+        sender.teardown()
